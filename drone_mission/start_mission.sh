@@ -3,7 +3,8 @@
 MISSION_FILE="${1:-/home/pi/mission.csv}"
 SHAPER="${2:-none}"
 ROPE_LENGTH="${3:-1.0}"
-FCU_URL="udp://0.0.0.0:14551@192.168.0.100:14550"
+FCU_URL="serial:///dev/ttyACM0:115200"  # for pixhawk
+#FCU_URL="udp://0.0.0.0:14551@192.168.0.100:14550" # for SITL
 LOG_DIR="/home/pi/logs"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 LOG_FILE="$LOG_DIR/flight_${SHAPER}_${TIMESTAMP}.csv"
