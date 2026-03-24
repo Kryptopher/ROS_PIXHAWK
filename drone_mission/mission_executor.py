@@ -5,7 +5,9 @@ from mavros_msgs.srv import CommandBool, SetMode, CommandTOL
 from mavros_msgs.msg import State, PositionTarget
 from nav_msgs.msg import Odometry
 import csv, time, math, sys
-
+import threading
+import subprocess
+from datetime import datetime
 MASK_POS_ONLY    = (PositionTarget.IGNORE_VX | PositionTarget.IGNORE_VY |
                     PositionTarget.IGNORE_VZ  | PositionTarget.IGNORE_AFX |
                     PositionTarget.IGNORE_AFY | PositionTarget.IGNORE_AFZ |
@@ -314,6 +316,7 @@ class MissionExecutor(Node):
             rows = list(csv.DictReader(f))
 
         self.takeoff_alt = 5.0
+        self.manual_takeoff  = False
         self.mission     = []
 
         for i, row in enumerate(rows):
@@ -325,6 +328,11 @@ class MissionExecutor(Node):
                 self.takeoff_alt = float(row['z'])
                 self.get_logger().info(
                     f'Takeoff altitude: {self.takeoff_alt}m')
+                continue
+
+            if seg_type == 'manual_takeoff':
+                self.manual_takeoff = True
+                self.get_logger().info('Manual takeoff mode')
                 continue
 
             if seg_type == 'end':
@@ -362,40 +370,67 @@ class MissionExecutor(Node):
             self.get_logger().error('No position data')
             return
 
-        self.set_mode('GUIDED')
-        if not self.wait_for_state(mode='GUIDED'):
-            self.get_logger().error('GUIDED failed')
-            return
-        self.get_logger().info('GUIDED confirmed')
-
-        self.arm(True)
-        if not self.wait_for_state(armed=True, timeout=5.0):
-            self.get_logger().error('Arm failed')
-            return
-        self.get_logger().info('Armed!')
-
-        self.get_logger().info(f'Taking off to {self.takeoff_alt}m...')
-        if not self.takeoff(self.takeoff_alt).success:
-            self.get_logger().error('Takeoff failed')
-            return
-
-        start = time.time()
-        while time.time() - start < 20.0:
-            rclpy.spin_once(self, timeout_sec=0.0)
-            if self.current_pos and \
-               self.current_pos.z >= self.takeoff_alt * 0.85:
+        if self.manual_takeoff:
+            # Wait for armed state
+            self.get_logger().info('Manual takeoff mode — waiting for you to arm and takeoff...')
+            self.get_logger().info('Take off manually, switch to LOITER, then press ENTER to start mission')
+            input('\nPress ENTER when ready to start mission...')
+            rclpy.spin_once(self, timeout_sec=0.1)
+            if self.current_pos:
                 self.get_logger().info(
-                    f'Reached {self.current_pos.z:.1f}m — starting mission!')
-                break
-            time.sleep(0.1)
+                    f'Starting at ({self.current_pos.x:.1f},{self.current_pos.y:.1f},{self.current_pos.z:.1f})')
+        else:
+            # GUIDED mode
+            self.set_mode('GUIDED')
+            if not self.wait_for_state(mode='GUIDED'):
+                self.get_logger().error('GUIDED failed')
+                return
+            self.get_logger().info('GUIDED confirmed')
+
+            # Arm
+            self.arm(True)
+            if not self.wait_for_state(armed=True, timeout=5.0):
+                self.get_logger().error('Arm failed')
+                return
+            self.get_logger().info('Armed!')
+
+            # Takeoff
+            self.get_logger().info(f'Taking off to {self.takeoff_alt}m...')
+            if not self.takeoff(self.takeoff_alt).success:
+                self.get_logger().error('Takeoff failed')
+                return
+
+            # Wait for altitude
+            start = time.time()
+            while time.time() - start < 20.0:
+                rclpy.spin_once(self, timeout_sec=0.0)
+                if self.current_pos and \
+                   self.current_pos.z >= self.takeoff_alt * 0.85:
+                    self.get_logger().info(
+                        f'Reached {self.current_pos.z:.1f}m — starting mission!')
+                    break
+                time.sleep(0.1)
 
         self.get_logger().info('--- MISSION START ---')
         self._mission_start  = time.time()
         self._seg_index      = 0
         self._mission_active = True
-
+        
+        # Start angle logger in background
+        angle_log = f'/home/pi/logs/angles_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'
+        angle_proc = subprocess.Popen(
+            ['python3', '/home/pi/ROS_PIXHAWK/drone_mission/angle_logger.py',
+             angle_log],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.get_logger().info(f'Angle logger started → {angle_log}')
+        
         while self._mission_active:
             rclpy.spin_once(self, timeout_sec=0.02)
+        
+        # Stop angle logger
+        angle_proc.terminate()
+        angle_proc.wait()
+        self.get_logger().info('Angle logger stopped')
 
         self.get_logger().info('Landing...')
         self.set_mode('LAND')

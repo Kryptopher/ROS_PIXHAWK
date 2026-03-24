@@ -161,19 +161,21 @@ pkill -f mavros_node   2>/dev/null
 pkill -f flight_logger 2>/dev/null
 sleep 1
 
-# ── Start MAVROS ──────────────────────────────────────────────
-echo "[2/4] Starting MAVROS..."
-ros2 run mavros mavros_node --ros-args \
-    -p fcu_url:=$FCU_URL \
-    -p target_system_id:=1 \
-    -p target_component_id:=1 \
-    -p system_id:=255 \
-    --log-level mavros:=WARN &
-MAVROS_PID=$!
+# ── Check MAVROS is running ───────────────────────────────────
+echo "[2/4] Checking MAVROS..."
+if systemctl is-active --quiet mavros; then
+    echo "      MAVROS service running ✅"
+else
+    echo "      MAVROS service not running, starting..."
+    sudo systemctl start mavros
+    sleep 3
+fi
 
+# Wait for connection
 echo "      Waiting for FCU connection..."
 TIMEOUT=30
 ELAPSED=0
+CONNECTED=""
 while [ $ELAPSED -lt $TIMEOUT ]; do
     CONNECTED=$(python3 -c "
 import rclpy
@@ -203,7 +205,6 @@ done
 
 if [ "$CONNECTED" != "yes" ]; then
     echo "[ERROR] MAVROS not connected after ${TIMEOUT}s"
-    kill $MAVROS_PID 2>/dev/null
     exit 1
 fi
 
@@ -229,9 +230,7 @@ kill $LOGGER_PID 2>/dev/null
 wait $LOGGER_PID 2>/dev/null
 echo " Log saved: $LOG_FILE"
 
-kill $MAVROS_PID 2>/dev/null
-wait $MAVROS_PID 2>/dev/null
-echo " MAVROS stopped."
+echo " MAVROS service left running."
 
 # ── Plot ──────────────────────────────────────────────────────
 echo ""

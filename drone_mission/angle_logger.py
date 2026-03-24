@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """
-Dual quadrature encoder - uses tick-accurate level from pigpio
-instead of re-reading pins, eliminating sampling skew errors
+Dual quadrature encoder angle logger - 200Hz CSV output
+Tick-accurate, chatter filtered
 """
 
 import pigpio
-import math
 import time
+import csv
+import sys
+import os
+from datetime import datetime
 
 # ── Pin assignments ────────────────────────────────────────────────────────────
-ENC1_A = 6   # white = A
-ENC1_B = 13   # green = B
+ENC1_A = 6    # white
+ENC1_B = 13   # green
 ENC2_A = 19
 ENC2_B = 26
 
@@ -20,36 +23,24 @@ COUNT_MODE     = 4
 GEAR_RATIO     = 1.0
 COUNTS_PER_REV = PPR * COUNT_MODE * GEAR_RATIO
 DEG_PER_COUNT  = 360.0 / COUNTS_PER_REV
-
 MIN_PULSE_US   = 300
 
 # ── State ──────────────────────────────────────────────────────────────────────
-# Store last KNOWN level of each pin, updated by callbacks
-pin_level = {
-    ENC1_A: 0, ENC1_B: 0,
-    ENC2_A: 0, ENC2_B: 0,
-}
-
-pitch_count      = 0
-roll_count       = 0
-last_tick        = {'pitch': 0, 'roll': 0}
-error_count      = {'pitch': 0, 'roll': 0}
-filtered_count   = {'pitch': 0, 'roll': 0}
-
-QUAD_TABLE = {
-    (0b00, 0b01): +1,
-    (0b01, 0b11): +1,
-    (0b11, 0b10): +1,
-    (0b10, 0b00): +1,
-    (0b00, 0b10): -1,
-    (0b10, 0b11): -1,
-    (0b11, 0b01): -1,
-    (0b01, 0b00): -1,
-}
-
+pin_level = {ENC1_A: 0, ENC1_B: 0, ENC2_A: 0, ENC2_B: 0}
+pitch_count    = 0
+roll_count     = 0
+last_tick      = {'pitch': 0, 'roll': 0}
+error_count    = {'pitch': 0, 'roll': 0}
+filtered_count = {'pitch': 0, 'roll': 0}
 last_pitch_state = 0b00
 last_roll_state  = 0b00
 
+QUAD_TABLE = {
+    (0b00, 0b01): +1, (0b01, 0b11): +1,
+    (0b11, 0b10): +1, (0b10, 0b00): +1,
+    (0b00, 0b10): -1, (0b10, 0b11): -1,
+    (0b11, 0b01): -1, (0b01, 0b00): -1,
+}
 
 def make_callback(axis):
     if axis == 'pitch':
@@ -60,7 +51,6 @@ def make_callback(axis):
     def callback(gpio, level, tick):
         global pitch_count, roll_count, last_pitch_state, last_roll_state
 
-        # ── Chatter filter ─────────────────────────────────────────────────────
         dt = tick - last_tick[axis]
         if dt < 0:
             dt += (1 << 32)
@@ -69,11 +59,7 @@ def make_callback(axis):
             return
         last_tick[axis] = tick
 
-        # ── Use pigpio-provided level directly — no re-read latency ───────────
-        # 'level' is the new state of the triggering pin at interrupt time.
-        # The other pin's last known level comes from its own last callback.
-        pin_level[gpio] = level   # update the pin that just changed
-
+        pin_level[gpio] = level
         A = pin_level[pin_A]
         B = pin_level[pin_B]
         new_state = (A << 1) | B
@@ -96,19 +82,22 @@ def make_callback(axis):
     return callback
 
 
-def main():
+def run_logger(log_file, duration=None):
+    """
+    Run the angle logger.
+    duration: seconds to log, None = log until Ctrl+C
+    """
     global pi, last_pitch_state, last_roll_state
+
+    os.makedirs(os.path.dirname(log_file), exist_ok=True)
 
     pi = pigpio.pi()
     if not pi.connected:
-        print("ERROR: Could not connect to pigpio daemon. Run: sudo pigpiod")
+        print('ERROR: pigpio not running. Run: sudo pigpiod')
         return
 
     for pin in [ENC1_A, ENC1_B, ENC2_A, ENC2_B]:
         pi.set_mode(pin, pigpio.INPUT)
-
-    # Seed pin levels and initial states from actual hardware
-    for pin in [ENC1_A, ENC1_B, ENC2_A, ENC2_B]:
         pin_level[pin] = pi.read(pin)
 
     last_pitch_state = (pin_level[ENC1_A] << 1) | pin_level[ENC1_B]
@@ -119,41 +108,68 @@ def main():
     cb2a = pi.callback(ENC2_A, pigpio.EITHER_EDGE, make_callback('roll'))
     cb2b = pi.callback(ENC2_B, pigpio.EITHER_EDGE, make_callback('roll'))
 
-    print(f"Tracking  |  {COUNTS_PER_REV:.0f} counts/rev  |  {DEG_PER_COUNT:.4f}°/count  |  chatter filter: {MIN_PULSE_US}µs")
-    print("Press Ctrl+C to stop.\n")
-    print(f"  {'Pitch':>10}  {'Roll':>10}  {'PitchCnt':>10}  {'RollCnt':>10}  {'Errs P/R':>10}  {'Filt P/R':>10}")
-    print(f"  {'-'*70}")
+    print(f'Logging angles to {log_file} at 200Hz')
+    if duration:
+        print(f'Duration: {duration}s')
+    print('Press Ctrl+C to stop\n')
+
+    start_time = time.time()
+    dt = 1.0 / 200.0
+    row_count = 0
 
     try:
-        while True:
-            pitch_deg = pitch_count * DEG_PER_COUNT
-            roll_deg  = roll_count  * DEG_PER_COUNT
+        with open(log_file, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['t', 'pitch_deg', 'roll_deg',
+                             'pitch_count', 'roll_count'])
 
-            print(
-                f"\r  {pitch_deg:>+9.2f}°  {roll_deg:>+9.2f}°  "
-                f"{pitch_count:>+10d}  {roll_count:>+10d}  "
-                f"{error_count['pitch']}/{error_count['roll']}  "
-                f"{'':>5}{filtered_count['pitch']}/{filtered_count['roll']}     ",
-                end="", flush=True
-            )
-            time.sleep(0.05)
+            next_t = time.time()
+            while True:
+                now = time.time()
+                elapsed = now - start_time
+
+                if duration and elapsed >= duration:
+                    break
+
+                if now >= next_t:
+                    pitch_deg = pitch_count * DEG_PER_COUNT
+                    roll_deg  = roll_count  * DEG_PER_COUNT
+                    writer.writerow([
+                        round(elapsed, 5),
+                        round(pitch_deg, 4),
+                        round(roll_deg, 4),
+                        pitch_count,
+                        roll_count
+                    ])
+                    row_count += 1
+                    next_t += dt
+
+                    # Print at 2Hz
+                    if row_count % 100 == 0:
+                        print(f'\rt={elapsed:.1f}s  '
+                              f'pitch={pitch_deg:+.2f}°  '
+                              f'roll={roll_deg:+.2f}°  '
+                              f'rows={row_count}    ',
+                              end='', flush=True)
 
     except KeyboardInterrupt:
-        pitch_deg = pitch_count * DEG_PER_COUNT
-        roll_deg  = roll_count  * DEG_PER_COUNT
-        print(f"\n\nFinal position:")
-        print(f"  Pitch: {pitch_deg:+.2f}°  ({pitch_count} counts)")
-        print(f"  Roll:  {roll_deg:+.2f}°  ({roll_count} counts)")
-        print(f"  Total: {math.sqrt(pitch_deg**2 + roll_deg**2):.2f}°")
-        print(f"\nDiagnostics:")
-        print(f"  Invalid transitions — Pitch: {error_count['pitch']}   Roll: {error_count['roll']}")
-        print(f"  Chatter filtered    — Pitch: {filtered_count['pitch']}   Roll: {filtered_count['roll']}")
-        print("\nStopped.")
+        pass
     finally:
         cb1a.cancel(); cb1b.cancel()
         cb2a.cancel(); cb2b.cancel()
         pi.stop()
+        print(f'\nSaved {row_count} rows to {log_file}')
+        print(f'Errors — pitch: {error_count["pitch"]}  roll: {error_count["roll"]}')
+        print(f'Filtered — pitch: {filtered_count["pitch"]}  roll: {filtered_count["roll"]}')
 
 
-if __name__ == "__main__":
+def main():
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_file  = sys.argv[1] if len(sys.argv) > 1 \
+                else f'/home/pi/logs/angles_{timestamp}.csv'
+    duration  = float(sys.argv[2]) if len(sys.argv) > 2 else None
+    run_logger(log_file, duration)
+
+
+if __name__ == '__main__':
     main()
