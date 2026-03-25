@@ -1,0 +1,5 @@
+t,type,mode,profile,x,y,z,vx,vy,vz,ax
+0,manual_takeoff,pos,hold,0,0,0,0,0,0,0
+5,cmd,vel,step,0,0,0,0.5,0,0,0
+10,cmd,vel,step,0,0,0,0,0,0,0
+50,end,end,end,0,0,0,0,0,0,0

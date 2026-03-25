@@ -82,7 +82,7 @@ def make_callback(axis):
     return callback
 
 
-def run_logger(log_file, duration=None):
+def run_logger(log_file, duration=None, shared_start_time=None):
     """
     Run the angle logger.
     duration: seconds to log, None = log until Ctrl+C
@@ -113,7 +113,15 @@ def run_logger(log_file, duration=None):
         print(f'Duration: {duration}s')
     print('Press Ctrl+C to stop\n')
 
-    start_time = time.time()
+    # Use shared start time if provided for sync with flight logger
+    if shared_start_time is not None:
+        start_time = shared_start_time
+        # Wait until shared start time if it's in the future
+        now = time.time()
+        if shared_start_time > now:
+            time.sleep(shared_start_time - now)
+    else:
+        start_time = time.time()
     dt = 1.0 / 200.0
     row_count = 0
 
@@ -164,11 +172,12 @@ def run_logger(log_file, duration=None):
 
 
 def main():
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_file  = sys.argv[1] if len(sys.argv) > 1 \
-                else f'/home/pi/logs/angles_{timestamp}.csv'
-    duration  = float(sys.argv[2]) if len(sys.argv) > 2 else None
-    run_logger(log_file, duration)
+    timestamp  = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_file   = sys.argv[1] if len(sys.argv) > 1 \
+                 else f'/home/pi/logs/angles_{timestamp}.csv'
+    duration   = float(sys.argv[2]) if len(sys.argv) > 2 else None
+    start_time = float(sys.argv[3]) if len(sys.argv) > 3 else None
+    run_logger(log_file, duration, start_time)
 
 
 if __name__ == '__main__':

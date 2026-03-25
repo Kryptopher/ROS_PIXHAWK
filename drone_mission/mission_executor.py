@@ -412,18 +412,27 @@ class MissionExecutor(Node):
                 time.sleep(0.1)
 
         self.get_logger().info('--- MISSION START ---')
-        self._mission_start  = time.time()
+        mission_start_time   = time.time()
+        # Write shared start time for flight logger sync
+        with open('/tmp/mission_start_time.txt', 'w') as f:
+            f.write(str(mission_start_time))
+        self._mission_start  = mission_start_time
         self._seg_index      = 0
         self._mission_active = True
-        
-        # Start angle logger in background
-        angle_log = f'/home/pi/logs/angles_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'
+
+        # Write shared start time for logger sync
+        with open('/tmp/mission_start_time.txt', 'w') as f:
+            f.write(str(mission_start_time))
+
+        # Start angle logger with same start time
+        timestamp  = datetime.now().strftime('%Y%m%d_%H%M%S')
+        angle_log  = f'/home/pi/logs/angles_{timestamp}.csv'
         angle_proc = subprocess.Popen(
             ['python3', '/home/pi/ROS_PIXHAWK/drone_mission/angle_logger.py',
-             angle_log],
+             angle_log, '0', str(mission_start_time)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.get_logger().info(f'Angle logger started → {angle_log}')
-        
+
         while self._mission_active:
             rclpy.spin_once(self, timeout_sec=0.02)
         
